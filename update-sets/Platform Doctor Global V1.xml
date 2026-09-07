@@ -1,0 +1,1295 @@
+<?xml version="1.0" encoding="UTF-8"?><unload unload_date="2026-09-07 12:31:14">
+<sys_remote_update_set action="INSERT_OR_UPDATE">
+<application display_value="Global">global</application>
+<application_name>Global</application_name>
+<application_scope>global</application_scope>
+<application_version/>
+<collisions/>
+<commit_date/>
+<deleted/>
+<description/>
+<inserted/>
+<name>Platform Doctor Global V1</name>
+<origin_sys_id/>
+<parent display_value=""/>
+<release_date/>
+<remote_base_update_set display_value=""/>
+<remote_parent_id/>
+<remote_sys_id>33d330f73b0f8b58513ab88a04e45aa3</remote_sys_id>
+<state>loaded</state>
+<summary/>
+<sys_class_name>sys_remote_update_set</sys_class_name>
+<sys_created_by>pm6198</sys_created_by>
+<sys_created_on>2026-09-07 12:31:13</sys_created_on>
+<sys_id>c09ef4f33b83cb58513ab88a04e45a67</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_updated_by>pm6198</sys_updated_by>
+<sys_updated_on>2026-09-07 12:31:13</sys_updated_on>
+<update_set display_value=""/>
+<update_source display_value=""/>
+<updated/>
+</sys_remote_update_set>
+<sys_update_xml action="INSERT_OR_UPDATE">
+<action>INSERT_OR_UPDATE</action>
+<application display_value="Global">global</application>
+<category>customer</category>
+<comments/>
+<name>sys_script_include_202668e82b4fc3d0b31cf96cfe91bf08</name>
+<payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_include"&gt;&lt;sys_script_include action="INSERT_OR_UPDATE"&gt;&lt;access&gt;public&lt;/access&gt;&lt;active&gt;true&lt;/active&gt;&lt;api_name&gt;global.platformDoctorUtils&lt;/api_name&gt;&lt;caller_access/&gt;&lt;client_callable&gt;false&lt;/client_callable&gt;&lt;description/&gt;&lt;mobile_callable&gt;false&lt;/mobile_callable&gt;&lt;name&gt;platformDoctorUtils&lt;/name&gt;&lt;sandbox_callable&gt;false&lt;/sandbox_callable&gt;&lt;script&gt;&lt;![CDATA[var platformDoctorUtils = Class.create();
+platformDoctorUtils.prototype = {
+    initialize: function() {
+        this.sampleSize = parseInt(
+            gs.getProperty('x_att2_fir_net_mob.records_to_test_per_notification', 2), 10) || 2;
+        this.checklistTable = 'x_att2_fir_net_mob_governace_checklist';
+        this.windowDays = parseInt(
+            gs.getProperty('x_att2_fir_net_mob.time.window.to.fetch.records', 30), 10) || 30;
+    },
+
+    /**
+     * Loop every active checklist record and process it in isolation. Each record
+     * uses its own table, filter and groupBy; results are split per groupBy value.
+     * Nothing is merged across checklist records (each item carries check_sys_id).
+     * @returns {{findingsPayload:Array, duplicatePayload:Array, nonDuplicatePayload:Array}}
+     */
+    run: function() {
+        var findings = [];
+        var duplicatePayload = [];
+        var nonDuplicatePayload = [];
+
+        var cfgs = [];
+        var gr = new GlideRecord(this.checklistTable);
+        gr.addQuery('u_active', true);
+        gr.query();
+        while (gr.next()) {
+            cfgs.push(this._rowConfig(gr));
+        }
+        this._processAll(cfgs, findings, duplicatePayload, nonDuplicatePayload);
+
+        return {
+            findingsPayload: findings,
+            duplicatePayload: duplicatePayload,
+            nonDuplicatePayload: nonDuplicatePayload
+        };
+    },
+
+    /**
+     * Validate a single checklist record on demand (e.g. UI Action).
+     * @param {string} checklistId sys_id of the governance checklist record
+     * @returns {{findingsPayload:Array, duplicatePayload:Array, nonDuplicatePayload:Array}}
+     */
+    runForCheck: function(checklistId) {
+        var findings = [];
+        var duplicatePayload = [];
+        var nonDuplicatePayload = [];
+
+        var row = new GlideRecord(this.checklistTable);
+        if (row.get(checklistId)) {
+            this._processAll([this._rowConfig(row)], findings, duplicatePayload, nonDuplicatePayload);
+        } else {
+            gs.warn('platformDoctorUtils: checklist row not found ' + checklistId);
+        }
+
+        return {
+            findingsPayload: findings,
+            duplicatePayload: duplicatePayload,
+            nonDuplicatePayload: nonDuplicatePayload
+        };
+    },
+
+    /**
+     * Validate multiple selected checklist records (e.g. List Action).
+     * @param {(string[]|string)} checklistIds array or comma-separated sys_ids
+     * @returns {{findingsPayload:Array, duplicatePayload:Array, nonDuplicatePayload:Array}}
+     */
+    runForChecks: function(checklistIds) {
+        var findings = [];
+        var duplicatePayload = [];
+        var nonDuplicatePayload = [];
+
+        var ids = (checklistIds instanceof Array) ? checklistIds : String(checklistIds || '').split(',');
+        ids = ids.map(function(s) {
+            return s.trim();
+        }).filter(function(s) {
+            return s;
+        });
+        if (ids.length) {
+            var cfgs = [];
+            var row = new GlideRecord(this.checklistTable);
+            row.addQuery('sys_id', 'IN', ids.join(','));
+            row.query();
+            while (row.next()) {
+                cfgs.push(this._rowConfig(row));
+            }
+            this._processAll(cfgs, findings, duplicatePayload, nonDuplicatePayload);
+        }
+
+        return {
+            findingsPayload: findings,
+            duplicatePayload: duplicatePayload,
+            nonDuplicatePayload: nonDuplicatePayload
+        };
+    },
+
+    /**
+     * Build a config object from one checklist GlideRecord row.
+     */
+    _rowConfig: function(gr) {
+        var cfg = {
+            sys_id: gr.getUniqueValue(),
+            table: gr.getValue('u_table'),
+            filter: gr.getValue('u_filter') || '',
+            groupBy: gr.getValue('u_groupby') || '',
+            fields: this._parseFields(gr.getValue('u_field_name')),
+            checkType: gr.getValue('u_check_type'),
+            findDuplicates: gr.getValue('u_find_duplicates') == '1',
+            condition: gr.getValue('u_condition') || '',
+            regex: gr.getValue('u_regex') || '',
+            aiPrompt: gr.getValue('u_ai_prompt'),
+            re: null
+        };
+        if (cfg.checkType === 'regex' &amp;&amp; cfg.regex) {
+            try {
+                cfg.re = new RegExp(cfg.regex, 'i');
+            } catch (e) {
+                gs.error('platformDoctorUtils: bad regex on ' + cfg.sys_id + ': ' + e.message);
+            }
+        }
+        return cfg;
+    },
+
+    /**
+     * Process all checklist configs in two phases so AI samples can exclude records
+     * already flagged by a condition/regex check:
+     *   phase 1 - duplicates + condition/regex (populate findings)
+     *   phase 2 - AI rows (skip any record that already has a finding)
+     */
+    _processAll: function(cfgs, findings, duplicatePayload, nonDuplicatePayload) {
+        var aiCfgs = [];
+        for (var i = 0; i &lt; cfgs.length; i++) {
+            var cfg = cfgs[i];
+            if (!cfg.table || !new GlideRecord(cfg.table).isValid()) {
+                gs.warn('platformDoctorUtils: invalid table ' + cfg.table);
+                continue;
+            }
+            if (cfg.findDuplicates) {
+                this._processDuplicateRow(cfg, duplicatePayload);
+            } else if (cfg.checkType === 'ai') {
+                aiCfgs.push(cfg);
+            } else {
+                this._processNonDuplicateRow(cfg, findings);
+            }
+        }
+
+        var flagged = this._flaggedSysIds(findings);
+        for (var a = 0; a &lt; aiCfgs.length; a++) {
+            this._processAiRow(aiCfgs[a], flagged, nonDuplicatePayload);
+        }
+
+        gs.info('platformDoctorUtils output: ' + JSON.stringify({
+            findingsPayload: findings,
+            duplicatePayload: duplicatePayload,
+            nonDuplicatePayload: nonDuplicatePayload
+        }));
+    },
+
+    /**
+     * sys_id set of records that already produced a finding (condition/regex).
+     */
+    _flaggedSysIds: function(findings) {
+        var set = {};
+        for (var i = 0; i &lt; findings.length; i++) {
+            set[findings[i].sys_id] = true;
+        }
+        return set;
+    },
+
+    /**
+     * Duplicate record: ALL rows matching the filter (no window, no sample limit),
+     * split into one payload item per groupBy value (groups of 2+ only).
+     */
+    _processDuplicateRow: function(cfg, duplicatePayload) {
+        var readFields = cfg.fields.slice();
+        if (cfg.groupBy &amp;&amp; readFields.indexOf(cfg.groupBy) === -1) {
+            readFields.push(cfg.groupBy);
+        }
+
+        var records = [];
+        var gr = new GlideRecord(cfg.table);
+        if (cfg.filter) {
+            gr.addEncodedQuery(cfg.filter);
+        }
+        gr.orderByDesc('sys_created_on');
+        gr.query();
+        while (gr.next()) {
+            records.push({
+                sys_id: gr.getUniqueValue(),
+                values: this._readFields(gr, readFields)
+            });
+        }
+        if (records.length &lt; 2) {
+            return;
+        }
+
+        var groupMap = this._splitByGroup(records, cfg);
+        for (var g in groupMap) {
+            if (groupMap[g].length &lt; 2) {
+                continue;
+            }
+            duplicatePayload.push({
+                check_sys_id: cfg.sys_id,
+                table: cfg.table,
+                groupBy: cfg.groupBy || cfg.table,
+                group: g,
+                fields: cfg.fields,
+                ai_prompt: cfg.aiPrompt,
+                records: this._projectRecords(groupMap[g], cfg.fields)
+            });
+        }
+    },
+
+    /**
+     * Condition/regex record: sampled + windowed rows matching the filter,
+     * evaluated to create findings (per matching record).
+     */
+    _processNonDuplicateRow: function(cfg, findings) {
+        var records = this._query(cfg);
+        while (records.next()) {
+            this._evaluateRow(cfg, records, findings);
+        }
+    },
+
+    /**
+     * AI record: sampled + windowed rows matching the filter, split per groupBy value.
+     * Records already flagged by a condition/regex finding are skipped (no need for AI).
+     */
+    _processAiRow: function(cfg, flagged, nonDuplicatePayload) {
+        var records = this._query(cfg);
+        var readFields = cfg.fields.slice();
+        if (cfg.groupBy &amp;&amp; readFields.indexOf(cfg.groupBy) === -1) {
+            readFields.push(cfg.groupBy);
+        }
+        var collected = [];
+        while (records.next()) {
+            var sysId = records.getUniqueValue();
+            if (flagged[sysId]) {
+                continue;
+            }
+            collected.push({
+                sys_id: sysId,
+                values: this._readFields(records, readFields)
+            });
+        }
+        var groupMap = this._splitByGroup(collected, cfg);
+        for (var g in groupMap) {
+            nonDuplicatePayload.push({
+                check_sys_id: cfg.sys_id,
+                table: cfg.table,
+                groupBy: cfg.groupBy || cfg.table,
+                group: g,
+                fields: cfg.fields,
+                ai_prompt: cfg.aiPrompt,
+                records: this._projectRecords(groupMap[g], cfg.fields)
+            });
+        }
+    },
+
+    /**
+     * Evaluate one condition or regex check against a single record.
+     */
+    _evaluateRow: function(cfg, gr, findings) {
+        if (cfg.checkType === 'condition') {
+            if (cfg.condition &amp;&amp; GlideFilter.checkRecord(gr, cfg.condition)) {
+                findings.push(this._finding(cfg, gr, 'Matched condition', cfg.fields.join(',')));
+            }
+            return;
+        }
+        if (cfg.checkType === 'regex') {
+            if (!cfg.re) {
+                return;
+            }
+            for (var f = 0; f &lt; cfg.fields.length; f++) {
+                var path = cfg.fields[f];
+                if (cfg.re.test(gr.getValue(path) || '')) {
+                    findings.push(this._finding(cfg, gr, 'Matched regex on ' + path, path));
+                    return;
+                }
+            }
+        }
+    },
+
+    /**
+     * Sampler for one record: group-by sampling if groupBy set, else newest N,
+     * always within the day window and the record filter. Returns a queried cursor.
+     */
+    _query: function(cfg) {
+        var since = this._since();
+
+        if (cfg.groupBy) {
+            var ids = [];
+            var agg = new GlideAggregate(cfg.table);
+            if (cfg.filter) {
+                agg.addEncodedQuery(cfg.filter);
+            }
+            agg.addNotNullQuery(cfg.groupBy);
+            agg.addQuery('sys_created_on', '&gt;=', since);
+            agg.groupBy(cfg.groupBy);
+            agg.addAggregate('COUNT');
+            agg.query();
+
+            while (agg.next()) {
+                var sub = new GlideRecord(cfg.table);
+                if (cfg.filter) {
+                    sub.addEncodedQuery(cfg.filter);
+                }
+                sub.addQuery(cfg.groupBy, agg.getValue(cfg.groupBy));
+                sub.addQuery('sys_created_on', '&gt;=', since);
+                sub.orderByDesc('sys_created_on');
+                sub.setLimit(this.sampleSize);
+                sub.query();
+                while (sub.next()) {
+                    ids.push(sub.getUniqueValue());
+                }
+            }
+
+            var grouped = new GlideRecord(cfg.table);
+            grouped.addQuery('sys_id', 'IN', ids.length ? ids.join(',') : 'none');
+            grouped.query();
+            return grouped;
+        }
+
+        var recent = new GlideRecord(cfg.table);
+        if (cfg.filter) {
+            recent.addEncodedQuery(cfg.filter);
+        }
+        recent.addQuery('sys_created_on', '&gt;=', since);
+        recent.orderByDesc('sys_created_on');
+        recent.setLimit(this.sampleSize);
+        recent.query();
+        return recent;
+    },
+
+    /**
+     * Split records into a map keyed by groupBy value (or table name when no groupBy).
+     */
+    _splitByGroup: function(records, cfg) {
+        var map = {};
+        for (var r = 0; r &lt; records.length; r++) {
+            var g = cfg.groupBy ? (records[r].values[cfg.groupBy] || '') : cfg.table;
+            if (!map[g]) {
+                map[g] = [];
+            }
+            map[g].push(records[r]);
+        }
+        return map;
+    },
+
+    /**
+     * Keep only the comparison fields in each record's values.
+     */
+    _projectRecords: function(list, fields) {
+        var out = [];
+        for (var i = 0; i &lt; list.length; i++) {
+            var vals = {};
+            for (var f = 0; f &lt; fields.length; f++) {
+                vals[fields[f]] = list[i].values[fields[f]];
+            }
+            out.push({
+                sys_id: list[i].sys_id,
+                values: vals
+            });
+        }
+        return out;
+    },
+
+    _parseFields: function(raw) {
+        if (!raw) {
+            return [];
+        }
+        return String(raw).split(/[,\n]/).map(function(s) {
+            return s.trim();
+        }).filter(function(s) {
+            return s;
+        });
+    },
+
+    _readFields: function(gr, fields) {
+        var values = {};
+        for (var i = 0; i &lt; fields.length; i++) {
+            values[fields[i]] = this._readField(gr, fields[i]);
+        }
+        return values;
+    },
+
+    _readField: function(gr, path) {
+        var current = gr;
+        var parts = String(path).split('.');
+        for (var i = 0; i &lt; parts.length; i++) {
+            var element = current.getElement(parts[i]);
+            if (!element) {
+                return null;
+            }
+            if (i === parts.length - 1) {
+                return element.getValue();
+            }
+            current = element.getRefRecord();
+            if (!current || !current.isValidRecord()) {
+                return null;
+            }
+        }
+        return null;
+    },
+
+    _finding: function(cfg, gr, detail, field) {
+        return {
+            check_sys_id: cfg.sys_id,
+            table: cfg.table,
+            sys_id: gr.getUniqueValue(),
+            field: field || cfg.fields.join(','),
+            check_type: cfg.checkType,
+            detail: detail
+        };
+    },
+
+    _since: function() {
+        var gdt = new GlideDateTime();
+        gdt.addDaysUTC(-this.windowDays);
+        return gdt;
+    },
+
+    type: 'platformDoctorUtils'
+};]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_include&lt;/sys_class_name&gt;&lt;sys_created_by&gt;pm6198&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-08-28 08:26:22&lt;/sys_created_on&gt;&lt;sys_id&gt;202668e82b4fc3d0b31cf96cfe91bf08&lt;/sys_id&gt;&lt;sys_mod_count&gt;23&lt;/sys_mod_count&gt;&lt;sys_name&gt;platformDoctorUtils&lt;/sys_name&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_include_202668e82b4fc3d0b31cf96cfe91bf08&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;pm6198&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-07 07:59:28&lt;/sys_updated_on&gt;&lt;/sys_script_include&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;202668e82b4fc3d0b31cf96cfe91bf08&lt;/id&gt;&lt;sys_created_by&gt;pm6198&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-08-28 08:26:21&lt;/sys_created_on&gt;&lt;sys_id&gt;fb9660ec2b4fc3d0b31cf96cfe91bfd9&lt;/sys_id&gt;&lt;sys_mod_count&gt;1&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;yg991f&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-06 16:09:01&lt;/sys_updated_on&gt;&lt;table&gt;sys_script_include&lt;/table&gt;&lt;use_es_latest&gt;false&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+<payload_hash>1428424191</payload_hash>
+<remote_update_set display_value="Platform Doctor Global V1">c09ef4f33b83cb58513ab88a04e45a67</remote_update_set>
+<replace_on_upgrade>false</replace_on_upgrade>
+<sys_created_by>pm6198</sys_created_by>
+<sys_created_on>2026-09-07 12:31:13</sys_created_on>
+<sys_id>489ef4f33b83cb58513ab88a04e45a67</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_recorded_at>1a07ae11db80000001</sys_recorded_at>
+<sys_updated_by>pm6198</sys_updated_by>
+<sys_updated_on>2026-09-07 12:31:13</sys_updated_on>
+<table/>
+<target_name>platformDoctorUtils</target_name>
+<type>Script Include</type>
+<update_domain>global</update_domain>
+<update_guid>135044b77f0fc758ea97c0711e49167f</update_guid>
+<update_guid_history>135044b77f0fc758ea97c0711e49167f:1428424191,732e37ab588bc758eb7c6ffd78f89ed3:-2051661734,b0d66caf7143cb183db77fd98e8acf9e:548128332,e483e0e36a03cb1829372dadb505a70c:444373354,7a50a42336cf8b18f2aa24e593190c48:-353627123,8146d0e7a88b8b18adf091d5365fbea3:1268909091,76f550a7148b8b18d066a14b143da568:-732941695,4f898771ca07cb54106c7fe50bf42cac:1268909091,f1267631e20b8b54156633aed3927b7e:-1460586638,6b49aeb123438b54807b1d6ced9615c4:-67804793,fef41df5764b4754e46e72c1729763c9:1357038093,bd945931144b4754cfcd08e082d18d14:1368683533,da5c42e833cfc710c8ea1970d2610c1c:448913219,fd4c066861cfc71029f6d28d3a021e3a:1624041681,e32b86288d8fc7105602bac5ec8d0c1e:448913219,36f90264734fc7102fdf5cbc9517ac72:596354585,e515316050c787d0023beea4c9d5e8c5:894156043,b3743d68628787d005ada94edfa8c132:-1402354492,55944164c4cf07d0e1721710041bcc0f:-1798838179,936005a0464b07d0409f601118772ba9:359227045,537b2cacd7cfc3d0cac9c579d84b4b3e:262503295,7267a420b28fc3d0bbe5b93ec9927366:961051875,bdd660603a8fc3d0ef8e9f4e2b0a1d3a:2038792094,11a62cec554fc3d0622172464a7b03b7:724564289</update_guid_history>
+<update_set display_value=""/>
+<view/>
+</sys_update_xml>
+<sys_update_xml action="INSERT_OR_UPDATE">
+<action>INSERT_OR_UPDATE</action>
+<application display_value="Global">global</application>
+<category>customer</category>
+<comments/>
+<name>sys_script_include_834effa72b074358b31cf96cfe91bf9e</name>
+<payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_include"&gt;&lt;sys_script_include action="INSERT_OR_UPDATE"&gt;&lt;access&gt;public&lt;/access&gt;&lt;active&gt;true&lt;/active&gt;&lt;api_name&gt;global.platformDoctorSensitiveScanner&lt;/api_name&gt;&lt;caller_access/&gt;&lt;client_callable&gt;false&lt;/client_callable&gt;&lt;description/&gt;&lt;mobile_callable&gt;false&lt;/mobile_callable&gt;&lt;name&gt;platformDoctorSensitiveScanner&lt;/name&gt;&lt;sandbox_callable&gt;false&lt;/sandbox_callable&gt;&lt;script&gt;&lt;![CDATA[var platformDoctorSensitiveScanner = Class.create();
+platformDoctorSensitiveScanner.prototype = {
+    initialize: function() {
+        this.patterns = this._buildPatterns();
+    },
+
+    /**
+     * Skill tool entry point. Runs deterministic regex verification for all
+     * sensitive-data conditions against the SAME payload given to the skill
+     * (a platformDoctorUtils block with records[], or a single email object),
+     * so the LLM gets real matches instead of guessing. Returns masked matches
+     * only - raw secret values never leave this function.
+     * @param {(string|Object)} payload - JSON string or object
+     * @returns {string} JSON: { admin_condition, findings:[{email_sys_id, has_sensitive_data, matches:[{type, masked_value}]}] }
+     */
+    verifySensitiveData: function(payload) {
+        var cfg = (typeof payload === 'string') ? this._safeParse(payload) : payload;
+        var adminCondition = (cfg.ai_prompt || cfg.admin_prompt || '').trim();
+
+        var items = cfg.records || cfg.samples;
+        if (!items) {
+            items = [{ sys_id: cfg.email_sys_id, values: { 'email.subject': cfg.subject, 'email.body': cfg.body } }];
+        }
+
+        var findings = [];
+        for (var i = 0; i &lt; items.length; i++) {
+            var rec = items[i];
+            var parsed = this._extractSubjectAndBody(rec);
+            var text = parsed.subject + '\n' + parsed.body;
+
+            var matches = this._verifyText(text);
+            if (adminCondition) {
+                var adminMatch = this._checkAdminCondition(text, adminCondition);
+                if (adminMatch) {
+                    matches.push(adminMatch);
+                }
+            }
+
+            findings.push({
+                email_sys_id: rec.sys_id,
+                has_sensitive_data: matches.length &gt; 0,
+                matches: matches
+            });
+        }
+
+        return JSON.stringify({
+            admin_condition: adminCondition || null,
+            findings: findings
+        });
+    },
+
+    /**
+     * JSON.parse rejects raw control characters (unescaped newline/tab/CR) inside
+     * string values. A well-formed JSON.stringify() never produces those, but a
+     * payload that was hand-copied/pasted (e.g. from a log viewer) can end up with
+     * real line breaks instead of the literal "\n" escape - re-escape and retry
+     */
+    _safeParse: function(raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            var sanitized = raw
+                .replace(/\r\n/g, '\\n')
+                .replace(/\r/g, '\\n')
+                .replace(/\n/g, '\\n')
+                .replace(/\t/g, '\\t');
+            return JSON.parse(sanitized);
+        }
+    },
+
+    /**
+     * Match subject/body by key NAME (e.g. "email.subject", "email.body",
+     * "email.body_text") rather than a hardcoded key, since checklist Field
+     * Names can vary per row.
+     */
+    _extractSubjectAndBody: function(rec) {
+        var subject = '';
+        var body = '';
+        var values = rec.values || {};
+        for (var key in values) {
+            var lower = key.toLowerCase();
+            if (!subject &amp;&amp; lower.indexOf('subject') !== -1) {
+                subject = values[key] || '';
+            } else if (!body &amp;&amp; lower.indexOf('body') !== -1) {
+                body = values[key] || '';
+            }
+        }
+        if (!subject &amp;&amp; !body) {
+            subject = rec.subject || '';
+            body = rec.body || '';
+        }
+        return { subject: subject, body: body };
+    },
+
+    /**
+     * Run every built-in condition (username, password, api key, access token,
+     * auth token/other secret, card details) against one block of text.
+     */
+    _verifyText: function(text) {
+        var matches = [];
+        for (var i = 0; i &lt; this.patterns.length; i++) {
+            var p = this.patterns[i];
+            p.re.lastIndex = 0;
+            var match;
+            while ((match = p.re.exec(text)) !== null) {
+                if (p.type === 'card_details' &amp;&amp; !this._passesLuhn(match[0])) {
+                    continue;
+                }
+                matches.push({ type: p.type, masked_value: this._mask(match[0]) });
+                if (!p.re.global) {
+                    break;
+                }
+            }
+        }
+        return matches;
+    },
+
+    /**
+     * Best-effort literal match for the admin's free-text (6th) condition;
+     * always surfaced to the LLM as top priority even when this can't match it.
+     */
+    _checkAdminCondition: function(text, adminCondition) {
+        var idx = text.toLowerCase().indexOf(adminCondition.toLowerCase());
+        if (idx === -1) {
+            return null;
+        }
+        var snippet = text.substring(idx, idx + adminCondition.length);
+        return { type: 'admin_condition', masked_value: this._mask(snippet) };
+    },
+
+    /**
+     * One regex per sensitive-data category. Order doesn't imply priority;
+     * the admin condition above always takes precedence when present.
+     */
+    _buildPatterns: function() {
+        return [
+            { type: 'username', re: /\b(?:user(?:name)?|uid|login)["'=:\s]+[A-Za-z0-9._@-]{3,}/gi },
+            { type: 'password', re: /\b(?:pwd|pass|password)["'=:\s]+\S{4,}/gi },
+            { type: 'api_key', re: /\b(?:api[_-]?key|apikey)["'=:\s]+[A-Za-z0-9_\-]{16,}/gi },
+            { type: 'access_token', re: /\bBearer\s+[A-Za-z0-9._\-]{16,}\b|\baccess_token["'=:\s]+[A-Za-z0-9._\-]{16,}|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/gi },
+            { type: 'auth_token_or_secret', re: /\b(?:auth_token|secret|client_secret)["'=:\s]+[A-Za-z0-9_\-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC )?PRIVATE KEY-----|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}/gi },
+            { type: 'card_details', re: /\b(?:\d[ -]*?){13,19}\b/g }
+        ];
+    },
+
+    /**
+     * Mask a raw value, keeping only the first/last 2 characters.
+     */
+    _mask: function(value) {
+        var v = String(value);
+        if (v.length &lt;= 4) {
+            return '****';
+        }
+        return v.substring(0, 2) + new Array(v.length - 3).join('*') + v.substring(v.length - 2);
+    },
+
+    _passesLuhn: function(raw) {
+        var digits = raw.replace(/\D/g, '');
+        if (digits.length &lt; 13 || digits.length &gt; 19) {
+            return false;
+        }
+        var sum = 0, alt = false;
+        for (var i = digits.length - 1; i &gt;= 0; i--) {
+            var n = parseInt(digits.charAt(i), 10);
+            if (alt) {
+                n *= 2;
+                if (n &gt; 9) {
+                    n -= 9;
+                }
+            }
+            sum += n;
+            alt = !alt;
+        }
+        return sum % 10 === 0;
+    },
+
+    type: 'platformDoctorSensitiveScanner'
+};]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_include&lt;/sys_class_name&gt;&lt;sys_created_by&gt;yg991f&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-09-07 07:50:40&lt;/sys_created_on&gt;&lt;sys_id&gt;834effa72b074358b31cf96cfe91bf9e&lt;/sys_id&gt;&lt;sys_mod_count&gt;8&lt;/sys_mod_count&gt;&lt;sys_name&gt;platformDoctorSensitiveScanner&lt;/sys_name&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_include_834effa72b074358b31cf96cfe91bf9e&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;yg991f&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-07 12:22:57&lt;/sys_updated_on&gt;&lt;/sys_script_include&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;834effa72b074358b31cf96cfe91bf9e&lt;/id&gt;&lt;sys_created_by&gt;yg991f&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-09-07 07:50:40&lt;/sys_created_on&gt;&lt;sys_id&gt;125ef3e72b074358b31cf96cfe91bf8b&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;yg991f&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-07 07:50:40&lt;/sys_updated_on&gt;&lt;table&gt;sys_script_include&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+<payload_hash>-1590272818</payload_hash>
+<remote_update_set display_value="Platform Doctor Global V1">c09ef4f33b83cb58513ab88a04e45a67</remote_update_set>
+<replace_on_upgrade>false</replace_on_upgrade>
+<sys_created_by>pm6198</sys_created_by>
+<sys_created_on>2026-09-07 12:31:13</sys_created_on>
+<sys_id>409ef4f33b83cb58513ab88a04e45a69</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_recorded_at>1a07bd258d60000001</sys_recorded_at>
+<sys_updated_by>pm6198</sys_updated_by>
+<sys_updated_on>2026-09-07 12:31:13</sys_updated_on>
+<table/>
+<target_name>platformDoctorSensitiveScanner</target_name>
+<type>Script Include</type>
+<update_domain>global</update_domain>
+<update_guid>47ac7cbb8783cb1891ad1db1b52fae6f</update_guid>
+<update_guid_history>47ac7cbb8783cb1891ad1db1b52fae6f:-1590272818,b1a0a87fb10f4b18280327f54ba2c0da:2095053724,7c471cf7e8c34b180050851122129d37:-936596309,cca654ff0e834b18ded875811483f074:1340705785,ee551cbfce434b18736af946db86f520:2095053724,0f70d03741cf0b18d477dd7adbcf6f9d:-936596309,63ab0c733b0f4358d1f97ee7c2e681d1:1340705785,759e33abbf07435858b135fe6b771e90:-1520066091,4b5ebbe72e0743588cb3b82d8206a91e:1673928152</update_guid_history>
+<update_set display_value=""/>
+<view/>
+</sys_update_xml>
+<sys_update_xml action="INSERT_OR_UPDATE">
+<action>INSERT_OR_UPDATE</action>
+<application display_value="Global">global</application>
+<category>customer</category>
+<comments/>
+<name>sys_script_include_b94ed0f23b8b87d4513ab88a04e45a49</name>
+<payload>&lt;?xml version="1.0" encoding="UTF-8"?&gt;&lt;record_update table="sys_script_include"&gt;&lt;sys_script_include action="INSERT_OR_UPDATE"&gt;&lt;access&gt;public&lt;/access&gt;&lt;active&gt;true&lt;/active&gt;&lt;api_name&gt;global.platformDoctorDuplicateAnalyzer&lt;/api_name&gt;&lt;caller_access/&gt;&lt;client_callable&gt;false&lt;/client_callable&gt;&lt;description/&gt;&lt;mobile_callable&gt;false&lt;/mobile_callable&gt;&lt;name&gt;platformDoctorDuplicateAnalyzer&lt;/name&gt;&lt;sandbox_callable&gt;false&lt;/sandbox_callable&gt;&lt;script&gt;&lt;![CDATA[var platformDoctorDuplicateAnalyzer = Class.create();
+platformDoctorDuplicateAnalyzer.prototype = {
+    initialize: function() {
+        this.checklistTable = 'x_att2_fir_net_mob_governace_checklist';
+        this.excludedScopes = this._parseList(
+            gs.getProperty('x_att2_fir_net_mob.duplicate_analysis.excluded_scopes', ''));
+        this.excludedPackages = this._parseList(
+            gs.getProperty('x_att2_fir_net_mob.duplicate_analysis.excluded_packages', ''));
+     
+        this.minConfidence = parseInt(
+            gs.getProperty('x_att2_fir_net_mob.duplicate_analysis.min_confidence', '80'), 10) || 80;
+    },
+
+    analyze: function(payloadJson) {
+        var payload;
+        try {
+            payload = JSON.parse(this._sanitizeJson(payloadJson));
+        } catch (e) {
+            return JSON.stringify({
+                status: 'error',
+                error: 'Invalid payload JSON: ' + e.message,
+                errorCode: 'E_INVALID_PAYLOAD'
+            });
+        }
+
+        var groups = this._extractGroups(payload);
+        if (!groups.length) {
+            return JSON.stringify({
+                status: 'error',
+                error: 'Payload missing duplicatePayload/table/records',
+                errorCode: 'E_EMPTY_PAYLOAD'
+            });
+        }
+
+        var checklistCache = {};
+        var finalizedExactGroups = [];
+        var pendingOverlapReview = [];
+
+        for (var i = 0; i &lt; groups.length; i++) {
+            var group = groups[i];
+            if (!group || !group.table || !group.records || !group.records.length) {
+                continue;
+            }
+
+            if (!checklistCache.hasOwnProperty(group.check_sys_id)) {
+                checklistCache[group.check_sys_id] = this._getChecklistConfig(group.check_sys_id);
+            }
+
+            var analyzed = this._analyzeGroup(group, checklistCache[group.check_sys_id]);
+            finalizedExactGroups = finalizedExactGroups.concat(analyzed.exact_duplicate_groups);
+
+            if (analyzed.candidate_overlaps.length) {
+                pendingOverlapReview.push({
+                    check_sys_id: group.check_sys_id,
+                    table: group.table,
+                    group: group.group,
+                    ai_prompt: group.ai_prompt || '',
+                    candidate_overlaps: analyzed.candidate_overlaps
+                });
+            }
+        }
+
+        finalizedExactGroups = finalizedExactGroups.filter(function(g) {
+            return g.confidence &gt;= this.minConfidence;
+        }, this);
+
+        return JSON.stringify({
+            status: 'success',
+            group_count: groups.length,
+            min_confidence: this.minConfidence,
+            finalized_exact_groups: finalizedExactGroups,
+            pending_overlap_review: pendingOverlapReview
+        });
+    },
+
+    /**
+     * Normalize the incoming payload into an array of flat group objects,
+     * whether it's the full {duplicatePayload:[...]} wrapper or a single
+     * flat group passed directly
+     */
+    _extractGroups: function(payload) {
+        if (!payload) {
+            return [];
+        }
+        if (payload.duplicatePayload instanceof Array) {
+            return payload.duplicatePayload;
+        }
+        if (payload.table &amp;&amp; payload.records) {
+            return [payload];
+        }
+        return [];
+    },
+
+    _sanitizeJson: function(raw) {
+        raw = String(raw || '');
+        var validEscapes = { '"': 1, '\\': 1, '/': 1, 'b': 1, 'f': 1, 'n': 1, 'r': 1, 't': 1, 'u': 1 };
+        var result = '';
+        var inString = false;
+
+        for (var i = 0; i &lt; raw.length; i++) {
+            var ch = raw.charAt(i);
+            var code = raw.charCodeAt(i);
+
+            if (ch === '\\') {
+                var next = raw.charAt(i + 1);
+                if (inString &amp;&amp; !validEscapes[next]) {
+                    // Stray backslash inside a string (e.g. regex \- \.): escape it,
+                    // leave the following character to be processed normally.
+                    result += '\\\\';
+                    continue;
+                }
+                result += ch;
+                if (next) {
+                    result += next;
+                    i++;
+                }
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = !inString;
+                result += ch;
+                continue;
+            }
+
+            if (inString &amp;&amp; code &lt; 0x20) {
+                switch (ch) {
+                    case '\n': result += '\\n'; break;
+                    case '\r': result += '\\r'; break;
+                    case '\t': result += '\\t'; break;
+                    case '\b': result += '\\b'; break;
+                    case '\f': result += '\\f'; break;
+                    default: result += '\\u' + ('0000' + code.toString(16)).slice(-4);
+                }
+                continue;
+            }
+
+            result += ch;
+        }
+
+        return result;
+    },
+
+    _analyzeGroup: function(group, checklistCfg) {
+        var enriched = this._enrichAndFilter(group, checklistCfg);
+
+        var exactDuplicates = this._findExactDuplicates(enriched.kept, group.fields);
+        var groupedSysIds = this._flattenSysIds(exactDuplicates);
+        var remaining = enriched.kept.filter(function(r) {
+            return groupedSysIds.indexOf(r.sys_id) === -1;
+        });
+        var candidateOverlaps = this._findCandidateOverlaps(remaining, group.fields);
+
+        return {
+            exact_duplicate_groups: this._finalizeExactDuplicates(group, exactDuplicates),
+            candidate_overlaps: candidateOverlaps
+        };
+    },
+
+    _finalizeExactDuplicates: function(group, exactDuplicates) {
+        return exactDuplicates.map(function(dup, idx) {
+            return {
+                group_id: group.check_sys_id + '.' + group.group + '.exact' + idx,
+                table: group.table,
+                match_type: 'exact',
+                sys_ids: dup.sys_ids,
+                confidence: 100,
+                reason: 'Identical values across configured comparison field(s): ' + group.fields.join(', ') + '.',
+                recommendation: 'Merge or remove the redundant duplicate record(s).'
+            };
+        });
+    },
+
+    _getChecklistConfig: function(checklistId) {
+        var cfg = { sys_id: checklistId, aiPrompt: '' };
+        if (!checklistId) {
+            return cfg;
+        }
+        var gr = new GlideRecord(this.checklistTable);
+        if (gr.get(checklistId)) {
+            cfg.aiPrompt = gr.getValue('u_ai_prompt') || '';
+        }
+        return cfg;
+    },
+
+    _enrichAndFilter: function(payload, checklistCfg) {
+        var kept = [];
+        var excludedCount = 0;
+
+        var ids = payload.records.map(function(r) { return r.sys_id; });
+        if (!ids.length) {
+            return { kept: kept, excludedCount: excludedCount };
+        }
+
+        var gr = new GlideRecord(payload.table);
+        gr.addQuery('sys_id', 'IN', ids.join(','));
+        gr.query();
+
+        var meta = {};
+        while (gr.next()) {
+            meta[gr.getUniqueValue()] = {
+                scope: gr.getValue('sys_scope'),
+                package: gr.getValue('sys_package'),
+                className: gr.getValue('sys_class_name')
+            };
+        }
+
+        for (var i = 0; i &lt; payload.records.length; i++) {
+            var rec = payload.records[i];
+            var m = meta[rec.sys_id] || {};
+
+            if (this.excludedScopes.indexOf(m.scope) !== -1 ||
+                this.excludedPackages.indexOf(m.package) !== -1) {
+                excludedCount++;
+                continue;
+            }
+
+            kept.push({
+                sys_id: rec.sys_id,
+                values: rec.values,
+                scope: m.scope || '',
+                package: m.package || ''
+            });
+        }
+
+        return { kept: kept, excludedCount: excludedCount };
+    },
+
+    _findExactDuplicates: function(records, fields) {
+        var buckets = {};
+        for (var i = 0; i &lt; records.length; i++) {
+            var key = this._signature(records[i].values, fields);
+            if (!buckets[key]) {
+                buckets[key] = [];
+            }
+            buckets[key].push(records[i]);
+        }
+
+        var groups = [];
+        for (var k in buckets) {
+            if (buckets[k].length &gt;= 2) {
+                groups.push({
+                    signature: k,
+                    sys_ids: buckets[k].map(function(r) { return r.sys_id; }),
+                    matching_fields: fields
+                });
+            }
+        }
+        return groups;
+    },
+
+    _findCandidateOverlaps: function(records, fields) {
+        var candidates = [];
+        var minMatches = Math.ceil(fields.length / 2) || 1;
+
+        for (var i = 0; i &lt; records.length; i++) {
+            for (var j = i + 1; j &lt; records.length; j++) {
+                var diff = this._diffFields(records[i].values, records[j].values, fields);
+                var sharedClauses = this._sharedClauses(records[i].values, records[j].values, fields);
+                var wholeFieldMatch = diff.matching.length &gt;= minMatches &amp;&amp; diff.differing.length;
+
+                if (wholeFieldMatch || sharedClauses.length) {
+                    candidates.push({
+                        sys_ids: [records[i].sys_id, records[j].sys_id],
+                        matching_fields: diff.matching,
+                        differing_fields: diff.differing,
+                        shared_clauses: sharedClauses
+                    });
+                }
+            }
+        }
+        return candidates;
+    },
+
+    _sharedClauses: function(valuesA, valuesB, fields) {
+        var shared = [];
+        for (var i = 0; i &lt; fields.length; i++) {
+            var a = this._clauses(valuesA[fields[i]]);
+            var b = this._clauses(valuesB[fields[i]]);
+            for (var x = 0; x &lt; a.length; x++) {
+                if (b.indexOf(a[x]) !== -1 &amp;&amp; shared.indexOf(a[x]) === -1) {
+                    shared.push(a[x]);
+                }
+            }
+        }
+        return shared;
+    },
+
+    _clauses: function(value) {
+        return String(value || '').split('^').map(function(c) {
+            return c.trim();
+        }).filter(function(c) {
+            return c &amp;&amp; c !== 'EQ' &amp;&amp; c !== 'NQ' &amp;&amp; c !== 'OR';
+        });
+    },
+
+    _diffFields: function(valuesA, valuesB, fields) {
+        var matching = [];
+        var differing = [];
+        for (var i = 0; i &lt; fields.length; i++) {
+            var f = fields[i];
+            if ((valuesA[f] || '') === (valuesB[f] || '')) {
+                matching.push(f);
+            } else {
+                differing.push(f);
+            }
+        }
+        return { matching: matching, differing: differing };
+    },
+
+    _signature: function(values, fields) {
+        var parts = [];
+        for (var i = 0; i &lt; fields.length; i++) {
+            parts.push(fields[i] + '=' + (values[fields[i]] || ''));
+        }
+        return parts.join('|');
+    },
+
+    _flattenSysIds: function(groups) {
+        var ids = [];
+        for (var i = 0; i &lt; groups.length; i++) {
+            ids = ids.concat(groups[i].sys_ids);
+        }
+        return ids;
+    },
+
+    _parseList: function(raw) {
+        return String(raw || '').split(',').map(function(s) {
+            return s.trim();
+        }).filter(function(s) {
+            return s;
+        });
+    },
+
+    extractDuplicateGroups: function(raw) {
+        var found = this._digForDuplicateGroups(raw, 0);
+        if (found) {
+            return found;
+        }
+
+        var text = (typeof raw === 'string') ? raw : JSON.stringify(raw || '');
+        var fragment = this._extractBalancedArray(text, '"duplicate_groups"');
+        if (fragment) {
+            try {
+                var unescaped = fragment;
+                var prev;
+                do {
+                    prev = unescaped;
+                    unescaped = unescaped.replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+                } while (unescaped !== prev);
+                var result = JSON.parse(unescaped);
+                if (result instanceof Array) {
+                    return result;
+                }
+            } catch (e3) {
+                gs.error('[PD] extractDuplicateGroups: bracket-balanced fragment failed to parse: ' + e3.message);
+            }
+        }
+
+        var salvaged = this._extractCompleteObjectsFromArray(text, '"duplicate_groups"');
+        if (salvaged.length) {
+            gs.warn('[PD] extractDuplicateGroups: response appears truncated - salvaged ' +
+                salvaged.length + ' complete entries out of a likely-longer list.');
+            return salvaged;
+        }
+
+        gs.warn('[PD] extractDuplicateGroups: no duplicate_groups found in raw output: ' +
+            text.substring(0, 500));
+        return [];
+    },
+
+    _extractCompleteObjectsFromArray: function(text, label) {
+        var labelIndex = text.indexOf(label);
+        if (labelIndex === -1) {
+            return [];
+        }
+        var arrStart = text.indexOf('[', labelIndex);
+        if (arrStart === -1) {
+            return [];
+        }
+
+        var results = [];
+        var i = arrStart + 1;
+        var n = text.length;
+
+        while (i &lt; n) {
+            while (i &lt; n &amp;&amp; /[\s,]/.test(text.charAt(i))) {
+                i++;
+            }
+            if (i &gt;= n || text.charAt(i) === ']') {
+                break;
+            }
+            if (text.charAt(i) !== '{') {
+                break;
+            }
+
+            var objStart = i;
+            var depth = 0;
+            var inString = false;
+            var closed = false;
+
+            for (; i &lt; n; i++) {
+                var ch = text.charAt(i);
+                if (ch === '\\' &amp;&amp; inString) {
+                    i++;
+                    continue;
+                }
+                if (ch === '"') {
+                    inString = !inString;
+                    continue;
+                }
+                if (inString) {
+                    continue;
+                }
+                if (ch === '{') {
+                    depth++;
+                } else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        closed = true;
+                        i++;
+                        break;
+                    }
+                }
+            }
+
+            if (!closed) {
+                break;
+            }
+
+            var objText = text.substring(objStart, i);
+            try {
+                var unescaped = objText;
+                var prev;
+                do {
+                    prev = unescaped;
+                    unescaped = unescaped.replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+                } while (unescaped !== prev);
+                results.push(JSON.parse(unescaped));
+            } catch (e) {
+                // Skip a malformed entry and keep trying the next one.
+            }
+        }
+
+        return results;
+    },
+
+    _extractBalancedArray: function(text, label) {
+        var labelIndex = text.indexOf(label);
+        if (labelIndex === -1) {
+            return null;
+        }
+        var start = text.indexOf('[', labelIndex);
+        if (start === -1) {
+            return null;
+        }
+
+        var depth = 0;
+        var inString = false;
+        for (var i = start; i &lt; text.length; i++) {
+            var ch = text.charAt(i);
+            if (ch === '\\' &amp;&amp; inString) {
+                i++;
+                continue;
+            }
+            if (ch === '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (ch === '[') {
+                depth++;
+            } else if (ch === ']') {
+                depth--;
+                if (depth === 0) {
+                    return text.substring(start, i + 1);
+                }
+            }
+        }
+        return null;
+    },
+
+    _digForDuplicateGroups: function(node, depth) {
+        if (depth &gt; 8 || node === null || node === undefined) {
+            return null;
+        }
+
+        if (node instanceof Array) {
+            for (var i = 0; i &lt; node.length; i++) {
+                var foundInArray = this._digForDuplicateGroups(node[i], depth + 1);
+                if (foundInArray) {
+                    return foundInArray;
+                }
+            }
+            return null;
+        }
+
+        if (typeof node === 'object') {
+            if (node.duplicate_groups instanceof Array) {
+                return node.duplicate_groups;
+            }
+            for (var key in node) {
+                if (!node.hasOwnProperty(key)) {
+                    continue;
+                }
+                var foundInProp = this._digForDuplicateGroups(node[key], depth + 1);
+                if (foundInProp) {
+                    return foundInProp;
+                }
+            }
+            return null;
+        }
+
+        if (typeof node === 'string') {
+            var stripped = node.replace(/^\s*"model_output"\s*:\s*/, '');
+            var parsed = null;
+            try {
+                parsed = JSON.parse(this._sanitizeJson(stripped));
+            } catch (e1) {
+                try {
+                    parsed = JSON.parse(this._sanitizeJson(node));
+                } catch (e2) {
+                    parsed = null;
+                }
+            }
+            if (parsed !== null &amp;&amp; typeof parsed === 'object') {
+                return this._digForDuplicateGroups(parsed, depth + 1);
+            }
+        }
+
+        return null;
+    },
+
+    buildWorkNotesHtmlFromSkillOutput: function(rawSkillOutput) {
+        return this.buildWorkNotesHtml(this.extractDuplicateGroups(rawSkillOutput));
+    },
+
+    buildWorkNotesHtml: function(duplicateGroups) {
+        if (typeof duplicateGroups === 'string') {
+            try {
+                duplicateGroups = JSON.parse(duplicateGroups);
+            } catch (e) {
+                duplicateGroups = [];
+            }
+        }
+        duplicateGroups = duplicateGroups || [];
+
+        if (!duplicateGroups.length) {
+            return '[code]&lt;p&gt;No duplicate or overlapping records were found for this check.&lt;/p&gt;[/code]';
+        }
+
+        var self = this;
+        var rows = duplicateGroups.map(function(g) {
+            return '&lt;tr&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.group_id) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.table) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.match_type) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.confidence) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml((g.sys_ids || []).join(', ')) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.reason) + '&lt;/td&gt;' +
+                '&lt;td&gt;' + self._escapeHtml(g.recommendation) + '&lt;/td&gt;' +
+                '&lt;/tr&gt;';
+        }).join('');
+
+        var html =
+            '&lt;table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse;width:100%;"&gt;' +
+            '&lt;thead&gt;&lt;tr&gt;' +
+            '&lt;th&gt;Group ID&lt;/th&gt;&lt;th&gt;Table&lt;/th&gt;&lt;th&gt;Match Type&lt;/th&gt;&lt;th&gt;Confidence&lt;/th&gt;' +
+            '&lt;th&gt;Sys IDs&lt;/th&gt;&lt;th&gt;Reason&lt;/th&gt;&lt;th&gt;Recommendation&lt;/th&gt;' +
+            '&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;' + rows + '&lt;/tbody&gt;&lt;/table&gt;';
+
+        return '[code]' + html + '[/code]';
+    },
+
+    _escapeHtml: function(value) {
+        return String(value === null || value === undefined ? '' : value)
+            .replace(/&amp;/g, '&amp;amp;')
+            .replace(/&lt;/g, '&amp;lt;')
+            .replace(/&gt;/g, '&amp;gt;')
+            .replace(/"/g, '&amp;quot;');
+    },
+
+    type: 'platformDoctorDuplicateAnalyzer'
+};
+]]&gt;&lt;/script&gt;&lt;sys_class_name&gt;sys_script_include&lt;/sys_class_name&gt;&lt;sys_created_by&gt;yg991f&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-09-04 07:37:22&lt;/sys_created_on&gt;&lt;sys_id&gt;b94ed0f23b8b87d4513ab88a04e45a49&lt;/sys_id&gt;&lt;sys_mod_count&gt;21&lt;/sys_mod_count&gt;&lt;sys_name&gt;platformDoctorDuplicateAnalyzer&lt;/sys_name&gt;&lt;sys_package display_value="Global" source="global"&gt;global&lt;/sys_package&gt;&lt;sys_policy/&gt;&lt;sys_scope display_value="Global"&gt;global&lt;/sys_scope&gt;&lt;sys_update_name&gt;sys_script_include_b94ed0f23b8b87d4513ab88a04e45a49&lt;/sys_update_name&gt;&lt;sys_updated_by&gt;yg991f&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-07 12:23:16&lt;/sys_updated_on&gt;&lt;/sys_script_include&gt;&lt;sys_es_latest_script action="INSERT_OR_UPDATE"&gt;&lt;id&gt;b94ed0f23b8b87d4513ab88a04e45a49&lt;/id&gt;&lt;sys_created_by&gt;yg991f&lt;/sys_created_by&gt;&lt;sys_created_on&gt;2026-09-04 07:37:21&lt;/sys_created_on&gt;&lt;sys_id&gt;168ed47a3b0b87d4513ab88a04e45a55&lt;/sys_id&gt;&lt;sys_mod_count&gt;0&lt;/sys_mod_count&gt;&lt;sys_updated_by&gt;yg991f&lt;/sys_updated_by&gt;&lt;sys_updated_on&gt;2026-09-04 07:37:21&lt;/sys_updated_on&gt;&lt;table&gt;sys_script_include&lt;/table&gt;&lt;use_es_latest&gt;true&lt;/use_es_latest&gt;&lt;/sys_es_latest_script&gt;&lt;/record_update&gt;</payload>
+<payload_hash>755550155</payload_hash>
+<remote_update_set display_value="Platform Doctor Global V1">c09ef4f33b83cb58513ab88a04e45a67</remote_update_set>
+<replace_on_upgrade>false</replace_on_upgrade>
+<sys_created_by>pm6198</sys_created_by>
+<sys_created_on>2026-09-07 12:31:13</sys_created_on>
+<sys_id>809e38f33b83cb58513ab88a04e45a18</sys_id>
+<sys_mod_count>0</sys_mod_count>
+<sys_recorded_at>1a07bd2a04e0000001</sys_recorded_at>
+<sys_updated_by>pm6198</sys_updated_by>
+<sys_updated_on>2026-09-07 12:31:13</sys_updated_on>
+<table/>
+<target_name>platformDoctorDuplicateAnalyzer</target_name>
+<type>Script Include</type>
+<update_domain>global</update_domain>
+<update_guid>2bbc707bfd43cb18447ea965226d18b7</update_guid>
+<update_guid_history>2bbc707bfd43cb18447ea965226d18b7:755550155,6ca2cfc397cf4718433abd4fb140c7ce:-859084933,0aef3203bb0f4718e554f485d4c5f302:560117365,f454110760c3c7541281a341415c5650:-321357836,1b22d9038e83c7543317372b75a3cbba:557845937,7d51994b0143c754ad764a968e55d04e:-798557113,527b4947e28f8754d4102ec6424a1b7b:557845937,0e4bc9c3b48f87547dafbc68acc00623:381673782,6a7a818fa74f8754f5d4f39abf0ce01e:-1767668920,ded94d4bb04f875417888da6dfafecc9:785611015,14170d87550f8754f4cec0ceb9546a2c:26760777,d44e8676840b87184e4d86e028a05b85:560117365,2f49c2b6cd078718d59858878655af4a:-962974712,12e80a32a10787180f51316ffab2ab89:385634290,dc98423ec1c38718f3e42a7fd65062dd:2014748687,98d78672cac3871876a63e65248473a0:-1214855223,9a358efa3d038718c5ebf5678b6d0c2b:2014748687,4cd14e7a5a4f4718dd7905d3c0c81603:-27125837,045af936a98747186fef4050257a0834:-291883745,3a47fdfaaf074718d3e766f0831003ae:1296368532,1617fdf20a0747185b87a3a89aa193b5:2072707067,bbf6fd3acd074718d3a261bdb9067113:342850730,a2d1b9be1acf071820aefe63216d8f65:1296368532,054b6536148b07189c66462b249fd67e:-408743263,97f26db2c8434bd4a0066a0ef473e6c7:2110617473,6097f07aa48bc7d47322acb1bb547f4b:-640968247,0ce63c76878bc7d46c8d984bb2b83779:1299535263,02b53032df8bc7d4a324f0518c83ca32:-647891730,9f34bcf6d04bc7d485d002dff3458c03:1299535263,b3f2f4329f4bc7d481433d9b56540c11:-1889587326,e4cd60fa7a47c7d47f6befa78f055daf:1115089835,779ed8f6788b87d41735d0698dd562f5:-1889587326,838ed4f67f8b87d4edc1ab8da17ed4ff:-363604237</update_guid_history>
+<update_set display_value=""/>
+<view/>
+</sys_update_xml>
+</unload>
